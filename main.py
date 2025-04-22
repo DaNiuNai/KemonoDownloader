@@ -15,7 +15,8 @@ log.add(sys.stderr, level="INFO")
 
 
 class DownloadException(Exception):
-    def __init__(self, status_code):
+    def __init__(self, msg, status_code):
+        self.msg = msg
         self.status_code = status_code
 
     def __str__(self):
@@ -26,19 +27,21 @@ class KemonoDownloader:
     def __init__(
         self,
         url: str,  # 用户主页的url
-        api_url="https://kemono.su/api/v1",
+        base_api_url="https://kemono.su/api/v1",
         image_api_url="https://img.kemono.su/thumbnail/data",
-        video_api_url="https://n2.kemono.su/data",
-        file_api_url="https://n4.kemono.su/data",
-        video2_api_url="https://n3.kemono.su/data",
-        video3_api_url="https://n1.kemono.su/data",
+        
+        file1_api_url="https://n1.kemono.su/data",
+        file2_api_url="https://n2.kemono.su/data",
+        file3_api_url="https://n3.kemono.su/data",
+        file4_api_url="https://n4.kemono.su/data",
     ):
-        self.api_url = api_url
+        self.base_api_url = base_api_url
         self.image_api_url = image_api_url
-        self.file_api_url = file_api_url
-        self.video_api_url = video_api_url
-        self.video2_api_url = video2_api_url
-        self.video3_api_url = video3_api_url
+        
+        self.file1_api_url = file1_api_url
+        self.file2_api_url = file2_api_url
+        self.file3_api_url = file3_api_url
+        self.file4_api_url = file4_api_url
         # 解析URL，提取路径部分并分割，过滤掉空字符串
         url_parsed_list = list(filter(None, urlparse(url).path.split("/")))
         self.service = url_parsed_list[0]
@@ -49,8 +52,8 @@ class KemonoDownloader:
         if mime_type:
             if mime_type.startswith("image/"):
                 return "image"
-            if mime_type.startswith("video/"):
-                return "video"
+            else:
+                return "other"
 
     def download_file(self, url, output_path):
         res = requests.get(url=url, stream=True)
@@ -59,19 +62,36 @@ class KemonoDownloader:
                 for chunk in res.iter_content(chunk_size=8192):
                     f.write(chunk)
         else:
-            raise DownloadException(res.status_code)
+            raise DownloadException("服务器响应码错误",res.status_code)
 
     def download_image(self, url_path, output_path):
         self.download_file(self.image_api_url + url_path, output_path)
     
-    def download_video(self,url_path, output_path):
-        try:
-            self.download_file(self.video_api_url + url_path, output_path)
-        except DownloadException:
+    def download_other(self,url_path, output_path):
+        video_urls = [
+            self.file1_api_url,
+            self.file2_api_url,
+            self.file3_api_url,
+            self.file4_api_url
+        ]
+        for video_url in video_urls:
             try:
-                self.download_file(self.video2_api_url + url_path, output_path)
-            except DownloadException:
-                    self.download_file(self.video3_api_url + url_path, output_path)
+                self.download_file(video_url + url_path, output_path)
+                return  # 成功则直接返回
+            except DownloadException as de:
+                continue  # 失败则尝试下一个
+        
+        # 如果所有URL都尝试失败，抛出异常
+        raise de
+    
+    def downloader(self,url_path,file_name,output_path):
+        file_type = self.get_file_type(file_name)
+        file_output_path = os.path.join(output_path, file_name)
+        if file_type == "image":
+            self.download_image(url_path, file_output_path)
+        if file_type == "other":
+            self.download_other(url_path, file_output_path)
+
 
     def get_post_info(self, req_interval=0.1) -> list[dict]:
         """获取用户帖子列表"""
@@ -79,7 +99,7 @@ class KemonoDownloader:
         res_list = []
         while True:
             res = requests.get(
-                url=f"{self.api_url}/{self.service}/user/{self.user_id}",
+                url=f"{self.base_api_url}/{self.service}/user/{self.user_id}",
                 params={"o": page_num},
             ).json()
             page_num += 50
@@ -91,12 +111,13 @@ class KemonoDownloader:
             res_list += res
             time.sleep(req_interval)
 
-        log.info(f"✅查询完成，该用户总帖子数量为：{len(res_list)}个")
+        log.success(f"🚀 查询完成，该用户总帖子数量为：{len(res_list)}个")
         return res_list
 
     def download_post(
         self, post_dict: list, output_dir_path: str, download_interval=0.1
     ):
+        """下载单个帖子"""
         # 检查下载存放目录是否存在
         if not os.path.exists(output_dir_path):
             os.mkdir(output_dir_path)
@@ -108,44 +129,28 @@ class KemonoDownloader:
 
         # 写入帖子文本内容
         if post_dict["content"]:
-            log.info(f"⌛写入帖子文本：{post_dict["title"]}")
+            log.info(f"📄 写入帖子文本：{post_dict["title"]}")
             content_html_path = os.path.join(post_storage_dir, "content.html")
             with open(content_html_path, "w", encoding="utf-8") as f:
                 f.write(post_dict["title"] + "\n" + post_dict["content"])
 
         # 下载文件
         if post_dict["file"]:
-            log.info(f"⌛下载文件：{post_dict['file']['name']}")
-            file_type = self.get_file_type(post_dict["file"]["name"])
-            file_output_path = os.path.join(post_storage_dir, post_dict["file"]["name"])
-            if file_type == "image":
-                self.download_image(post_dict["file"]["path"], file_output_path)
-            if file_type == "video":
-                self.download_video(post_dict["file"]["path"], file_output_path)
+            log.info(f"⌛ 下载文件：{post_dict['file']['name']}")
+            self.downloader(post_dict["file"]["path"],post_dict['file']['name'],post_storage_dir)
             time.sleep(download_interval)
 
         # 下载附件
         if post_dict["attachments"]:
-            log.info(f"⌛下载附件：共 {len(post_dict['attachments'])} 个")
+            log.info(f"⌛ 下载附件：共 {len(post_dict['attachments'])} 个")
             attachment_num = 1
             for attachment in post_dict["attachments"]:
-                file_type = self.get_file_type(attachment["name"])
-                attachment_output_path = os.path.join(
-                    post_storage_dir, attachment["name"]
-                )
-                if file_type == "image":
-                    self.download_file(
-                        self.image_api_url + attachment["path"], attachment_output_path
-                    )
-                elif file_type == "video":
-                    self.download_video(attachment["path"],
-                            attachment_output_path)
-
+                self.downloader(attachment["path"],attachment["name"],post_storage_dir)
                 time.sleep(download_interval)
-                log.info(f"📦下载附件：{attachment['name']} | {attachment_num}/{len(post_dict['attachments'])}")
+                log.info(f"📦 下载附件：{attachment['name']} | {attachment_num}/{len(post_dict['attachments'])}")
                 attachment_num += 1
 
-        log.info("✅帖子下载完成")
+        log.info("✅ 帖子下载完成")
 
     def download_posts(
         self,
@@ -160,9 +165,9 @@ class KemonoDownloader:
                 self.download_post(post, output_dir_path, download_interval)
                 time.sleep(download_interval)
             except DownloadException as e:
-                log.error(f"❌帖子下载失败 帖子ID：{post['id']} | 服务器响应码：{e.status_code}")
+                log.error(f"❌ 帖子下载失败 帖子ID：{post['id']} | 服务器响应码：{e.status_code}")
                 error_list.append(post)
-        log.success(f"🚀下载完毕")
+        log.success(f"🚀 下载完毕 | 下载成功：{len(post_list)-len(error_list)}/{len(post_list)}")
         if error_list != []:
             with open(error_output_dir_path, "w", encoding="utf-8") as f:
                 json.dump(error_list, f, indent=4, ensure_ascii=False)
@@ -239,10 +244,10 @@ class KemonoDownloader:
 if __name__ == "__main__":
     kd = KemonoDownloader("https://kemono.su/patreon/user/58531325")
     post_list = kd.get_post_info()
-    # with open("temp/user_info.json", "w", encoding="utf-8") as f:
-    #     json.dump(post_list, f, indent=4, ensure_ascii=False)
+    with open("temp/user_info.json", "w", encoding="utf-8") as f:
+        json.dump(post_list, f, indent=4, ensure_ascii=False)
 
-    # with open("temp/error.json", "r", encoding="utf-8") as f:
-    #     post_list = json.load(f)
+    with open("temp/user_info.json", "r", encoding="utf-8") as f:
+        post_list = json.load(f)
     # download_fail_list = kd.download_post(post_list[10], r"./temp")
     download_fail_list = kd.download_posts(post_list, r"./temp")
